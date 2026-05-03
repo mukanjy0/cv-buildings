@@ -29,6 +29,53 @@ def create_sift():
     return cv.SIFT_create()
 
 
+def get_image_path(dataset: str, image_id: str):
+    img_dir = DATASETS[dataset]["img_dir"]
+
+    for ext in IMG_EXTS:
+        p = img_dir / f"{image_id}{ext}"
+        if p.exists():
+            return p
+
+    return None
+
+
+def sift_meanstd_from_bbox(dataset: str, image_id: str, bbox, detector=None):
+    if detector is None:
+        detector = create_sift()
+
+    image_path = get_image_path(dataset, image_id)
+    if image_path is None:
+        raise FileNotFoundError(f"Image not found for id: {image_id}")
+
+    gray = cv.imread(str(image_path), cv.IMREAD_GRAYSCALE)
+    if gray is None:
+        raise ValueError(f"Could not read image: {image_path}")
+
+    x1, y1, x2, y2 = bbox
+
+    keypoints, desc = detector.detectAndCompute(gray, None)
+
+    if desc is None or len(desc) == 0:
+        return np.zeros(256, dtype=np.float32)
+
+    keep = []
+    for i, kp in enumerate(keypoints):
+        x, y = kp.pt
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            keep.append(i)
+
+    if len(keep) == 0:
+        return np.zeros(256, dtype=np.float32)
+
+    desc = desc[keep].astype(np.float32)
+
+    mean = desc.mean(axis=0)
+    std = desc.std(axis=0)
+
+    return np.concatenate([mean, std]).astype(np.float32)
+
+
 def extract_sift_meanstd(image_path: Path, detector=None):
     if detector is None:
         detector = create_sift()

@@ -10,7 +10,7 @@ def list_query_files(gt_dir: Path):
     return sorted(gt_dir.glob("*_query.txt"))
 
 
-def parse_query_file(query_file: Path):
+def parse_query_file(query_file: Path, return_bbox=False):
     query_name = query_file.stem.replace("_query", "")
 
     with open(query_file, "r") as f:
@@ -22,6 +22,11 @@ def parse_query_file(query_file: Path):
         raw_img_name = raw_img_name[len("oxc1_"):]
 
     image_id = Path(raw_img_name).stem
+
+    if return_bbox:
+        x1, y1, x2, y2 = map(float, parts[1:5])
+        return query_name, image_id, (x1, y1, x2, y2)
+
     return query_name, image_id
 
 
