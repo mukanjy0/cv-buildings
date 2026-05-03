@@ -1,0 +1,66 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+
+# VSCode / JetBrains
+.vscode/
+.idea/
+
+# =========================
+# Build / binaries
+# =========================
+*.o
+*.out
+*.exe
+compute_ap
+
+# =========================
+# Cache (VERY IMPORTANT)
+# =========================
+cache/
+
+# =========================
+# Results / outputs
+# =========================
+results/
+
+# =========================
+# Large data
+# =========================
+oxford/data/img/
+paris/data/img/
+zips/
+
+# Keep ground truth tracked
+# !oxford/data/gt/
+# !paris/data/gt/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Misc
+# =========================
+*.swp
+*.swo
