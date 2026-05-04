@@ -606,3 +606,60 @@ The next logical direction is to keep the pipeline centered on large-vocabulary 
 - The best Paris score progressed from 0.372444 in Round 2 to 0.406194 in Round 4, an absolute gain of 0.033750 mAP.
 - Round 5 improved the best Oxford score to 0.354805 and the best Paris score to 0.431121.
 - The strongest final direction is a classical large-vocabulary SIFT/RootSIFT BoVW retrieval system followed by tuned spatial verification. For the report, this gives a clean experimental story: baseline BoVW → larger vocabulary and query expansion → global fusion attempt → geometric reranking → larger local vocabularies and verified expansion with a second geometry pass.
+
+# Round 6
+
+Run on Oxford first, with Paris validation restricted to the strongest new multi-scale SIFT configurations.
+
+## Motivation
+
+Round 6 tested one high-upside classical-only change rather than another broad tuning sweep: aggregate SIFT descriptors across multiple resized versions of each image before BoVW quantization. The goal was to see whether explicit multi-scale descriptor pooling could improve the first-stage vocabulary representation enough to help the established spatial-verification pipeline.
+
+## Exact specs
+
+- Descriptor: multi-scale SIFT
+- Scales: [0.75, 1.0, 1.25]
+- Database descriptors: full image at each scale, descriptor sets concatenated
+- Query descriptors: keypoints mapped back to original image coordinates, then restricted to the query bounding box
+- BoVW vocabularies: trained separately for `multiscale_sift`, not reused from single-scale SIFT
+- Vocabulary sizes: k=2048 and k=4096
+- Normalization/metric: L2 + cosine
+- Spatial verification: top150, Lowe ratio 0.65, RANSAC inlier count
+- Conditional follow-up: verified QE top3 alpha0.5 plus a second spatial-verification pass for any promising Oxford spatial result
+
+## Top Oxford results
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.363375 | multiscale_sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+| 0.348529 | multiscale_sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+| 0.335536 | multiscale_sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.333212 | multiscale_sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.321382 | multiscale_sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.319413 | multiscale_sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.240694 | multiscale_sift_bovw_k2048_l2_cosine |
+| 0.234460 | multiscale_sift_bovw_k4096_l2_cosine |
+
+## Paris validation
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.445350 | multiscale_sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+| 0.443337 | multiscale_sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+
+## Comparison to Round 5 best
+
+- Round 5 Oxford best: 0.354805
+- Round 6 Oxford best: 0.363375
+- Oxford delta: +0.008570
+- Round 5 Paris best: 0.431121
+- Round 6 Paris best among validated configs: 0.445350
+- Paris delta: +0.014229
+
+## Interpretation
+
+Multi-scale aggregation beat the Round 5 Oxford best, so the extra scale coverage appears to add useful local evidence.
+
+## Worth including in final report
+
+Yes, as a candidate final method.

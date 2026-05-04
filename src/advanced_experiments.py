@@ -43,6 +43,8 @@ CONFIG_KEY_COLUMNS = [
     "extra_params",
 ]
 
+MULTISCALE_SIFT_SCALES = (0.75, 1.0, 1.25)
+
 
 class DependencyUnavailable(RuntimeError):
     pass
@@ -74,7 +76,7 @@ def create_surf():
 
 
 def create_detector(descriptor):
-    if descriptor in ("sift", "rootsift"):
+    if descriptor in ("sift", "rootsift", "multiscale_sift"):
         return create_sift()
     if descriptor == "surf":
         return create_surf()
@@ -188,6 +190,36 @@ def descriptor_cache_path(dataset, descriptor, image_id):
     return CACHE_DIR / "descriptors" / dataset / descriptor / f"{image_id}.npz"
 
 
+def extract_multiscale_sift(gray, detector, scales=MULTISCALE_SIFT_SCALES):
+    all_xy = []
+    all_desc = []
+    h, w = gray.shape[:2]
+    for scale in scales:
+        if scale == 1.0:
+            scaled = gray
+        else:
+            scaled_w = max(1, int(round(w * scale)))
+            scaled_h = max(1, int(round(h * scale)))
+            if scaled_w < 2 or scaled_h < 2:
+                continue
+            interpolation = cv.INTER_AREA if scale < 1.0 else cv.INTER_CUBIC
+            scaled = cv.resize(gray, (scaled_w, scaled_h), interpolation=interpolation)
+        keypoints, desc = detector.detectAndCompute(scaled, None)
+        if desc is None or len(desc) == 0:
+            continue
+        xy = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+        xy /= float(scale)
+        all_xy.append(xy)
+        all_desc.append(desc.astype(np.float32))
+
+    if not all_desc:
+        return (
+            np.empty((0, 2), dtype=np.float32),
+            np.empty((0, detector.descriptorSize()), dtype=np.float32),
+        )
+    return np.vstack(all_xy).astype(np.float32), np.vstack(all_desc).astype(np.float32)
+
+
 def extract_local_descriptor(dataset, image_id, descriptor="sift", detector=None, force=False):
     path = descriptor_cache_path(dataset, descriptor, image_id)
     skip_cache_write = False
@@ -212,15 +244,18 @@ def extract_local_descriptor(dataset, image_id, descriptor="sift", detector=None
 
     if detector is None:
         detector = create_detector(descriptor)
-    keypoints, desc = detector.detectAndCompute(gray, None)
-    if desc is None or len(desc) == 0:
-        xy = np.empty((0, 2), dtype=np.float32)
-        desc = np.empty((0, detector.descriptorSize()), dtype=np.float32)
+    if descriptor == "multiscale_sift":
+        xy, desc = extract_multiscale_sift(gray, detector)
     else:
-        xy = np.array([kp.pt for kp in keypoints], dtype=np.float32)
-        desc = desc.astype(np.float32)
-        if descriptor == "rootsift":
-            desc = rootsift_transform(desc)
+        keypoints, desc = detector.detectAndCompute(gray, None)
+        if desc is None or len(desc) == 0:
+            xy = np.empty((0, 2), dtype=np.float32)
+            desc = np.empty((0, detector.descriptorSize()), dtype=np.float32)
+        else:
+            xy = np.array([kp.pt for kp in keypoints], dtype=np.float32)
+            desc = desc.astype(np.float32)
+            if descriptor == "rootsift":
+                desc = rootsift_transform(desc)
 
     if not skip_cache_write:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -710,6 +745,8 @@ def read_ranking(path):
 
 
 def descriptor_from_experiment_name(exp_name):
+    if str(exp_name).startswith("multiscale_sift_"):
+        return "multiscale_sift"
     if str(exp_name).startswith("rootsift_"):
         return "rootsift"
     return "sift"
@@ -722,7 +759,7 @@ def vocab_size_from_experiment_name(exp_name, default=1024):
 
 def base_bovw_config_from_name(dataset, exp_name):
     base = str(exp_name).split("_spatial_verify", 1)[0].split("_verified_qe", 1)[0]
-    match = re.match(r"(?P<descriptor>sift|rootsift)_bovw(?P<tfidf>_tfidf)?_k(?P<k>\d+)_(?P<norm>[^_]+)_(?P<metric>.+)", base)
+    match = re.match(r"(?P<descriptor>multiscale_sift|rootsift|sift)_bovw(?P<tfidf>_tfidf)?_k(?P<k>\d+)_(?P<norm>[^_]+)_(?P<metric>.+)", base)
     if not match:
         raise ValueError(f"Cannot parse BoVW base experiment: {exp_name}")
     representation = "bovw_tfidf" if match.group("tfidf") else "bovw"
@@ -1199,7 +1236,7 @@ def alpha_tag(alpha):
     return str(alpha).replace(".", "p")
 
 
-def make_verified_qe_config(dataset, base, top_m, alpha):
+def make_verified_qe_config(dataset, base, top_m, alpha, phase=5):
     bovw_cfg = base_bovw_config_from_name(dataset, base)
     return ExperimentConfig(
         dataset=dataset,
@@ -1213,7 +1250,7 @@ def make_verified_qe_config(dataset, base, top_m, alpha):
             "base_experiment": base,
             "top_m": top_m,
             "alpha": alpha,
-            "phase": 5,
+            "phase": phase,
         },
     )
 
@@ -1647,11 +1684,11 @@ def run_spatial_verify2_for_best_verified_qe(dataset, verified_rows, compute_ap_
     return [run_experiment(cfg, compute_ap_exe)]
 
 
-def make_spatial_verify2_config(dataset, verified_qe_exp):
+def make_spatial_verify2_config(dataset, verified_qe_exp, phase=5):
     cfg = make_spatial_config(dataset, verified_qe_exp, 150, 0.65, "inlier_count")
     cfg.experiment = f"{verified_qe_exp}_spatial_verify2_top150_ratio0p65_inliers"
     cfg.extra_params["base_experiment"] = verified_qe_exp
-    cfg.extra_params["phase"] = 5
+    cfg.extra_params["phase"] = phase
     return cfg
 
 
@@ -1738,6 +1775,233 @@ def print_phase5_report(rows):
     print(f"Phase 5 failed/skipped experiments: {len(failed)} failed, {len(skipped)} skipped")
     for row in failed[:20]:
         print(f"Failed summary: {row.get('dataset')}/{row.get('experiment')}: {row.get('error')}")
+
+
+def phase6_bovw_configs(dataset="oxford"):
+    for k in (2048, 4096):
+        yield ExperimentConfig(
+            dataset=dataset,
+            experiment=f"multiscale_sift_bovw_k{k}_l2_cosine",
+            descriptor="multiscale_sift",
+            representation="bovw",
+            metric="cosine",
+            normalization="l2",
+            vocab_size=k,
+            extra_params={
+                "random_state": 0,
+                "phase": 6,
+                "scales": list(MULTISCALE_SIFT_SCALES),
+            },
+        )
+
+
+def phase6_spatial_configs(dataset="oxford"):
+    for cfg in phase6_bovw_configs(dataset):
+        spatial_cfg = make_spatial_config(dataset, cfg.experiment, 150, 0.65, "inlier_count")
+        spatial_cfg.extra_params["phase"] = 6
+        spatial_cfg.extra_params["scales"] = list(MULTISCALE_SIFT_SCALES)
+        yield spatial_cfg
+
+
+def ok_summary_row(dataset, experiment):
+    out = summary_path(False)
+    if not out.exists():
+        return None
+    df = pd.read_csv(out)
+    ok = df[
+        df["dataset"].fillna("").astype(str).eq(dataset)
+        & df["experiment"].fillna("").astype(str).eq(experiment)
+        & df["status"].fillna("").astype(str).eq("ok")
+    ].copy()
+    if ok.empty:
+        return None
+    return ok.iloc[-1].to_dict()
+
+
+def phase6_simple_baseline(row):
+    k = int(row.get("vocab_size") or vocab_size_from_experiment_name(row["experiment"]))
+    return {2048: 0.313679, 4096: 0.330680}.get(k, 0.330680)
+
+
+def phase6_oxford_rows():
+    out = summary_path(False)
+    if not out.exists():
+        return pd.DataFrame(columns=SUMMARY_COLUMNS)
+    df = pd.read_csv(out)
+    return df[
+        df["dataset"].eq("oxford")
+        & df["status"].eq("ok")
+        & df["experiment"].fillna("").astype(str).str.startswith("multiscale_sift_")
+    ].copy()
+
+
+def markdown_result_table(rows, limit=8):
+    if rows is None or len(rows) == 0:
+        return "(none)"
+    lines = ["| mAP | experiment |", "| --- | ---------- |"]
+    for _, row in rows.head(limit).iterrows():
+        lines.append(f"| {float(row['map']):.6f} | {row['experiment']} |")
+    return "\n".join(lines)
+
+
+def append_round6_progress(validated_paris_experiments):
+    path = Path("progress.md")
+    text = path.read_text(encoding="utf-8")
+    if "# Round 6" in text:
+        print("Round 6 section already exists in progress.md; leaving it unchanged")
+        return
+
+    write_sorted_summary()
+    df = pd.read_csv(summary_path(False))
+    ok = df[df["status"].eq("ok")].copy()
+    ox = ok[
+        ok["dataset"].eq("oxford")
+        & ok["experiment"].fillna("").astype(str).str.startswith("multiscale_sift_")
+    ].sort_values("map", ascending=False)
+    pa = ok[
+        ok["dataset"].eq("paris")
+        & ok["experiment"].fillna("").astype(str).isin(set(validated_paris_experiments))
+    ].sort_values("map", ascending=False)
+
+    best_ox = ox.iloc[0] if not ox.empty else None
+    best_pa = pa.iloc[0] if not pa.empty else None
+    round5_ox = 0.354805
+    round5_pa = 0.431121
+    ox_delta = float(best_ox["map"]) - round5_ox if best_ox is not None else np.nan
+    pa_delta = float(best_pa["map"]) - round5_pa if best_pa is not None else np.nan
+    best_ox_text = f"{float(best_ox['map']):.6f}" if best_ox is not None else "none"
+    best_pa_text = f"{float(best_pa['map']):.6f}" if best_pa is not None else "none"
+    ox_delta_text = f"{ox_delta:+.6f}" if pd.notna(ox_delta) else "n/a"
+    pa_delta_text = f"{pa_delta:+.6f}" if pd.notna(pa_delta) else "n/a"
+    worth = (
+        "Yes, as a candidate final method."
+        if (pd.notna(ox_delta) and ox_delta > 0) or (pd.notna(pa_delta) and pa_delta > 0)
+        else "Worth including as a final controlled negative/ablation, but not as the final system unless qualitative examples show a clear benefit."
+    )
+    interpretation = (
+        "Multi-scale aggregation beat the Round 5 Oxford best, so the extra scale coverage appears to add useful local evidence."
+        if pd.notna(ox_delta) and ox_delta > 0
+        else "Multi-scale aggregation did not beat the Round 5 Oxford best in this controlled run, suggesting that the current large-vocabulary SIFT/RootSIFT plus geometry pipeline already captures most of the useful scale variation."
+    )
+
+    section = f"""
+
+# Round 6
+
+Run on Oxford first, with Paris validation restricted to the strongest new multi-scale SIFT configurations.
+
+## Motivation
+
+Round 6 tested one high-upside classical-only change rather than another broad tuning sweep: aggregate SIFT descriptors across multiple resized versions of each image before BoVW quantization. The goal was to see whether explicit multi-scale descriptor pooling could improve the first-stage vocabulary representation enough to help the established spatial-verification pipeline.
+
+## Exact specs
+
+- Descriptor: multi-scale SIFT
+- Scales: {list(MULTISCALE_SIFT_SCALES)}
+- Database descriptors: full image at each scale, descriptor sets concatenated
+- Query descriptors: keypoints mapped back to original image coordinates, then restricted to the query bounding box
+- BoVW vocabularies: trained separately for `multiscale_sift`, not reused from single-scale SIFT
+- Vocabulary sizes: k=2048 and k=4096
+- Normalization/metric: L2 + cosine
+- Spatial verification: top150, Lowe ratio 0.65, RANSAC inlier count
+- Conditional follow-up: verified QE top3 alpha0.5 plus a second spatial-verification pass for any promising Oxford spatial result
+
+## Top Oxford results
+
+{markdown_result_table(ox)}
+
+## Paris validation
+
+{markdown_result_table(pa)}
+
+## Comparison to Round 5 best
+
+- Round 5 Oxford best: 0.354805
+- Round 6 Oxford best: {best_ox_text}
+- Oxford delta: {ox_delta_text}
+- Round 5 Paris best: 0.431121
+- Round 6 Paris best among validated configs: {best_pa_text}
+- Paris delta: {pa_delta_text}
+
+## Interpretation
+
+{interpretation}
+
+## Worth including in final report
+
+{worth}
+"""
+    path.write_text(text.rstrip() + section + "\n", encoding="utf-8")
+    print("Appended Round 6 section to progress.md")
+
+
+def run_phase6():
+    before = pd.read_csv(summary_path(False)) if summary_path(False).exists() else pd.DataFrame(columns=SUMMARY_COLUMNS)
+    compute_ap_exe = compute_ap_executable()
+    rows = []
+    phase6_cfg_map = {}
+
+    print("Phase 6A: Multi-scale SIFT BoVW on Oxford")
+    bovw_cfgs = list(phase6_bovw_configs("oxford"))
+    for cfg in bovw_cfgs:
+        phase6_cfg_map[cfg.experiment] = cfg
+    rows.extend(run_configs(bovw_cfgs, compute_ap_exe).to_dict("records"))
+
+    print("Phase 6B: Spatial verification for multi-scale SIFT BoVW on Oxford")
+    spatial_cfgs = list(phase6_spatial_configs("oxford"))
+    for cfg in spatial_cfgs:
+        phase6_cfg_map[cfg.experiment] = cfg
+    rows.extend(run_configs(spatial_cfgs, compute_ap_exe).to_dict("records"))
+
+    spatial_rows = [
+        row for row in (ok_summary_row("oxford", cfg.experiment) for cfg in spatial_cfgs)
+        if row is not None
+    ]
+    promising = [
+        row for row in spatial_rows
+        if float(row["map"]) > phase6_simple_baseline(row)
+    ]
+    if promising:
+        print("Phase 6C: Verified QE and second spatial pass for promising Oxford multi-scale results")
+        verified_cfgs = []
+        for row in promising:
+            cfg = make_verified_qe_config("oxford", row["experiment"], 3, 0.5, phase=6)
+            phase6_cfg_map[cfg.experiment] = cfg
+            verified_cfgs.append(cfg)
+        verified_rows = run_configs(verified_cfgs, compute_ap_exe).to_dict("records")
+        rows.extend(verified_rows)
+        for cfg in verified_cfgs:
+            verified_row = ok_summary_row("oxford", cfg.experiment)
+            if verified_row is None:
+                continue
+            sv2_cfg = make_spatial_verify2_config("oxford", cfg.experiment, phase=6)
+            phase6_cfg_map[sv2_cfg.experiment] = sv2_cfg
+            rows.append(run_experiment(sv2_cfg, compute_ap_exe))
+    else:
+        print("Phase 6C: No multi-scale spatial result beat its simple large-vocab baseline; skipping verified QE")
+
+    write_sorted_summary()
+    ox = phase6_oxford_rows().sort_values("map", ascending=False)
+    top_ox = ox.head(2).to_dict("records")
+    validated_paris_experiments = []
+    print("Phase 6D: Paris validation for strongest 1-2 new Oxford configurations")
+    for row in top_ox:
+        base_cfg = phase6_cfg_map.get(row["experiment"])
+        if base_cfg is None:
+            base_cfg = config_from_summary_row(row, dataset="oxford")
+        paris_cfg = equivalent_phase5_config(base_cfg, "paris")
+        base_exp = (paris_cfg.extra_params or {}).get("base_experiment")
+        if base_exp:
+            rows.extend(run_dependency_for_base("paris", base_exp, compute_ap_exe))
+        rows.append(run_experiment(paris_cfg, compute_ap_exe))
+        validated_paris_experiments.append(paris_cfg.experiment)
+
+    write_sorted_summary()
+    append_round6_progress(validated_paris_experiments)
+    after = pd.read_csv(summary_path(False)) if summary_path(False).exists() else pd.DataFrame(columns=SUMMARY_COLUMNS)
+    newly_added = max(0, len(after) - len(before))
+    print_final_report(newly_added)
+    return pd.DataFrame(rows)
 
 
 def print_final_report(newly_added=None):
@@ -1863,6 +2127,7 @@ def main(argv=None):
     parser.add_argument("--spatial-tuning-phase", action="store_true", help="Run spatial verification tuning and alternative-base phase.")
     parser.add_argument("--with-fisher-smoke", action="store_true", help="Also attempt the optional Oxford Fisher Vector smoke test.")
     parser.add_argument("--phase5", action="store_true", help="Run Phase 5 RootSIFT, larger vocabulary, verified QE, and spatial refinement experiments.")
+    parser.add_argument("--phase6", action="store_true", help="Run Phase 6 multi-scale SIFT BoVW experiment.")
     args = parser.parse_args(argv)
 
     if args.safe_extended:
@@ -1876,6 +2141,9 @@ def main(argv=None):
         return
     if args.phase5:
         run_phase5()
+        return
+    if args.phase6:
+        run_phase6()
         return
 
     datasets = parse_csv_arg(args.datasets)
