@@ -663,3 +663,46 @@ Multi-scale aggregation beat the Round 5 Oxford best, so the extra scale coverag
 ## Worth including in final report
 
 Yes, as a candidate final method.
+
+# Final artifact generation
+
+Generated the final report/presentation artifact pack with `scripts/generate_final_artifacts.py`.
+
+Output root:
+
+- `results/final_artifacts/`
+
+Generated artifact counts:
+
+- Quantitative plots/diagrams: 6
+- Top-5 qualitative grids: 56
+- Progression grids: 6
+- Before/after grids: 12
+- Final-method failure cases: 20
+- Spatial verification match figures: 12
+- CSV tables and indexes: 10
+
+Key files:
+
+- `results/final_artifacts/README.md`
+- `results/final_artifacts/artifact_index.csv`
+- `results/final_artifacts/quantitative/map_progress_by_round.png`
+- `results/final_artifacts/quantitative/final_pipeline_diagram.png`
+- `results/final_artifacts/tables/best_per_round.csv`
+- `results/final_artifacts/tables/method_ablation_summary.csv`
+- `results/final_artifacts/tables/qualitative_cases.csv`
+- `results/final_artifacts/tables/before_after_cases.csv`
+- `results/final_artifacts/tables/failure_cases.csv`
+- `results/final_artifacts/tables/spatial_verification_examples.csv`
+
+Verification:
+
+- Opened and inspected `map_progress_by_round.png`.
+- Opened and inspected one progression grid.
+- Opened and inspected one before/after grid.
+- Opened and inspected one final-method failure grid.
+- Opened and inspected one spatial-verification match figure.
+
+Issues:
+
+- No artifact-generation issues were logged; see `results/final_artifacts/logs/issues.csv`.
