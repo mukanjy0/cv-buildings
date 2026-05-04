@@ -1,5 +1,7 @@
 import argparse
 import json
+import math
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -69,6 +71,25 @@ def create_surf():
     if xfeatures2d is None or not hasattr(xfeatures2d, "SURF_create"):
         raise DependencyUnavailable("cv.xfeatures2d.SURF_create is unavailable")
     return xfeatures2d.SURF_create()
+
+
+def create_detector(descriptor):
+    if descriptor in ("sift", "rootsift"):
+        return create_sift()
+    if descriptor == "surf":
+        return create_surf()
+    raise ValueError(f"Unknown local descriptor: {descriptor}")
+
+
+def rootsift_transform(desc, l2=True):
+    if desc is None or len(desc) == 0:
+        return desc
+    desc = desc.astype(np.float32, copy=True)
+    desc /= (np.sum(np.abs(desc), axis=1, keepdims=True) + 1e-12)
+    desc = np.sqrt(np.maximum(desc, 0.0))
+    if l2:
+        desc /= (np.linalg.norm(desc, axis=1, keepdims=True) + 1e-12)
+    return desc.astype(np.float32)
 
 
 def compute_ap_executable():
@@ -190,7 +211,7 @@ def extract_local_descriptor(dataset, image_id, descriptor="sift", detector=None
         raise ValueError(f"Could not read image: {image_path}")
 
     if detector is None:
-        detector = create_sift() if descriptor == "sift" else create_surf()
+        detector = create_detector(descriptor)
     keypoints, desc = detector.detectAndCompute(gray, None)
     if desc is None or len(desc) == 0:
         xy = np.empty((0, 2), dtype=np.float32)
@@ -198,6 +219,8 @@ def extract_local_descriptor(dataset, image_id, descriptor="sift", detector=None
     else:
         xy = np.array([kp.pt for kp in keypoints], dtype=np.float32)
         desc = desc.astype(np.float32)
+        if descriptor == "rootsift":
+            desc = rootsift_transform(desc)
 
     if not skip_cache_write:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +254,7 @@ def extract_or_load_meanstd(dataset, descriptor):
     if feat_path.exists() and ids_path.exists():
         return load_ids(ids_path), np.load(feat_path)
 
-    detector = create_surf() if descriptor == "surf" else create_sift()
+    detector = create_detector(descriptor)
     dim = detector.descriptorSize()
     ids = image_ids(dataset)
     feats = []
@@ -347,7 +370,7 @@ def run_meanstd_experiment(cfg, compute_ap_exe):
     if np.isnan(X).any():
         raise ValueError("NaN found in feature matrix")
     id_to_idx = {image_id: i for i, image_id in enumerate(ids)}
-    detector = create_surf() if cfg.descriptor == "surf" else create_sift()
+    detector = create_detector(cfg.descriptor)
     dim = detector.descriptorSize()
     out_dir = RESULTS_DIR / "rankings" / cfg.dataset / cfg.experiment
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -383,7 +406,7 @@ def train_or_load_vocab(dataset, descriptor, k, random_state=0, max_descriptors=
     if path.exists():
         return load(path)
 
-    detector = create_sift()
+    detector = create_detector(descriptor)
     rng = np.random.default_rng(random_state)
     sampled = []
     total = 0
@@ -427,9 +450,9 @@ def hist_from_desc(desc, vocab, k):
 
 
 def bovw_cache_paths(cfg):
-    tag = f"sift_bovw_k{cfg.vocab_size}_{cfg.normalization}"
+    tag = f"{cfg.descriptor}_bovw_k{cfg.vocab_size}_{cfg.normalization}"
     if cfg.representation in ("bovw_tfidf", "tfidf_bovw"):
-        tag = f"sift_bovw_tfidf_k{cfg.vocab_size}_{cfg.normalization}"
+        tag = f"{cfg.descriptor}_bovw_tfidf_k{cfg.vocab_size}_{cfg.normalization}"
     out_dir = CACHE_DIR / "features" / cfg.dataset
     return out_dir / f"{tag}.npy", out_dir / f"{tag}_ids.txt", out_dir / f"{tag}_idf.npy"
 
@@ -442,7 +465,7 @@ def build_or_load_bovw_features(cfg, vocab):
         return load_ids(ids_path), X, idf
 
     ids = image_ids(cfg.dataset)
-    detector = create_sift()
+    detector = create_detector(cfg.descriptor)
     raw = []
     for image_id in tqdm(ids, desc=f"Building {cfg.representation} histograms for {cfg.dataset}/k{cfg.vocab_size}"):
         _, desc = extract_local_descriptor(cfg.dataset, image_id, cfg.descriptor, detector)
@@ -467,8 +490,8 @@ def build_or_load_bovw_features(cfg, vocab):
     return ids, X, idf
 
 
-def query_bovw_vector(dataset, query_image_id, bbox, vocab, k, normalization, idf=None):
-    xy, desc = extract_local_descriptor(dataset, query_image_id, "sift", create_sift())
+def query_bovw_vector(dataset, query_image_id, bbox, vocab, k, normalization, idf=None, descriptor="sift"):
+    xy, desc = extract_local_descriptor(dataset, query_image_id, descriptor, create_detector(descriptor))
     hist = hist_from_desc(descriptors_in_bbox(xy, desc, bbox), vocab, k).reshape(1, -1)
     if idf is not None:
         hist = hist * idf.reshape(1, -1)
@@ -587,7 +610,10 @@ def run_bovw_experiment(cfg, compute_ap_exe):
 
     for qf in tqdm(list_query_files(DATASETS[cfg.dataset]["gt_dir"]), desc=f"Ranking {cfg.dataset}/{cfg.experiment}"):
         query_name, query_image_id, bbox = parse_query_file(qf, return_bbox=True)
-        qvec = query_bovw_vector(cfg.dataset, query_image_id, bbox, vocab, cfg.vocab_size, cfg.normalization, idf)
+        qvec = query_bovw_vector(
+            cfg.dataset, query_image_id, bbox, vocab, cfg.vocab_size,
+            cfg.normalization, idf, descriptor=cfg.descriptor
+        )
         ranking = rank_vector(qvec, X, ids, cfg.metric, query_image_id)
         if qe_m:
             qvec = rerank_with_query_expansion(
@@ -632,7 +658,7 @@ def base_bovw_qe_components(dataset):
 
 
 def base_bovw_qe_scores(dataset, query_image_id, bbox, vocab, ids, X, idf):
-    qvec = query_bovw_vector(dataset, query_image_id, bbox, vocab, 1024, "l2", idf)
+    qvec = query_bovw_vector(dataset, query_image_id, bbox, vocab, 1024, "l2", idf, descriptor="sift")
     initial_ranking = rank_vector(qvec, X, ids, "cosine", query_image_id)
     qvec = rerank_with_query_expansion(
         qvec, X, ids, initial_ranking, "cosine", 3, alpha=0.25, normalization="l2"
@@ -683,8 +709,75 @@ def read_ranking(path):
         return [line.strip() for line in f if line.strip()]
 
 
+def descriptor_from_experiment_name(exp_name):
+    if str(exp_name).startswith("rootsift_"):
+        return "rootsift"
+    return "sift"
+
+
+def vocab_size_from_experiment_name(exp_name, default=1024):
+    match = re.search(r"_k(\d+)_", str(exp_name))
+    return int(match.group(1)) if match else default
+
+
+def base_bovw_config_from_name(dataset, exp_name):
+    base = str(exp_name).split("_spatial_verify", 1)[0].split("_verified_qe", 1)[0]
+    match = re.match(r"(?P<descriptor>sift|rootsift)_bovw(?P<tfidf>_tfidf)?_k(?P<k>\d+)_(?P<norm>[^_]+)_(?P<metric>.+)", base)
+    if not match:
+        raise ValueError(f"Cannot parse BoVW base experiment: {exp_name}")
+    representation = "bovw_tfidf" if match.group("tfidf") else "bovw"
+    metric = match.group("metric")
+    extra = {"random_state": 0}
+    qe_match = re.search(r"_qe_top(?P<m>\d+)_alpha(?P<alpha>[0-9p]+)", metric)
+    if qe_match:
+        metric = metric[:qe_match.start()]
+        extra["query_expansion_m"] = int(qe_match.group("m"))
+        extra["query_expansion_alpha"] = float(qe_match.group("alpha").replace("p", "."))
+    return ExperimentConfig(
+        dataset=dataset,
+        experiment=base,
+        descriptor=match.group("descriptor"),
+        representation=representation,
+        metric=metric,
+        normalization=match.group("norm"),
+        vocab_size=int(match.group("k")),
+        extra_params=extra,
+    )
+
+
+def bovw_query_components(dataset, query_image_id, bbox, cfg, vocab, ids, X, idf):
+    qvec = query_bovw_vector(
+        dataset, query_image_id, bbox, vocab, cfg.vocab_size,
+        cfg.normalization, idf, descriptor=cfg.descriptor
+    )
+    qe_m = (cfg.extra_params or {}).get("query_expansion_m")
+    qe_alpha = (cfg.extra_params or {}).get("query_expansion_alpha", 0.5)
+    if qe_m:
+        ranking = rank_vector(qvec, X, ids, cfg.metric, query_image_id)
+        qvec = rerank_with_query_expansion(
+            qvec, X, ids, ranking, cfg.metric, qe_m, alpha=qe_alpha,
+            normalization=cfg.normalization,
+        )
+    return qvec
+
+
+def base_original_similarity_by_id(dataset, base_exp, query_image_id, bbox, ids):
+    try:
+        cfg = base_bovw_config_from_name(dataset, base_exp)
+        vocab = train_or_load_vocab(cfg.dataset, cfg.descriptor, cfg.vocab_size)
+        feature_ids, X, idf = build_or_load_bovw_features(cfg, vocab)
+        if feature_ids != ids:
+            return {}
+        qvec = bovw_query_components(dataset, query_image_id, bbox, cfg, vocab, ids, X, idf)
+        scores = similarity_scores(qvec, X, cfg.metric)
+        return {image_id: float(score) for image_id, score in zip(ids, normalize_scores(scores))}
+    except Exception as exc:
+        print(f"Could not compute original similarities for {dataset}/{base_exp}: {exc}")
+        return {}
+
+
 def spatial_verification_score(q_xy, q_desc, db_xy, db_desc, ratio, scoring="inlier_count",
-                               min_matches=0, min_inliers=0):
+                               min_matches=0, min_inliers=0, original_score=0.0):
     if len(q_desc) < 4 or len(db_desc) < 4:
         return 0.0
     matcher = cv.BFMatcher(cv.NORM_L2)
@@ -711,6 +804,12 @@ def spatial_verification_score(q_xy, q_desc, db_xy, db_desc, ratio, scoring="inl
         return float(inlier_ratio)
     if scoring == "inliers_plus_ratio":
         return float(inliers + 10.0 * inlier_ratio)
+    if scoring == "inliers_plus_original_score":
+        return float(inliers + 0.01 * original_score)
+    if scoring == "normalized_inliers":
+        return float(inliers / max(math.log(2.0 + len(db_xy)), 1e-12))
+    if scoring == "thresholded_inliers":
+        return float(inliers if inliers >= 8 else 0.0)
     if scoring == "inlier_count":
         return float(inliers)
     raise ValueError(f"Unknown spatial verification scoring mode: {scoring}")
@@ -724,12 +823,13 @@ def run_spatial_verification_experiment(cfg, compute_ap_exe):
     min_matches = int(params.get("min_matches", 0) or 0)
     min_inliers = int(params.get("min_inliers", 0) or 0)
     base_exp = params.get("base_experiment", "sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25")
+    spatial_descriptor = params.get("spatial_descriptor") or descriptor_from_experiment_name(base_exp)
     ids = image_ids(cfg.dataset)
     base_dir = RESULTS_DIR / "rankings" / cfg.dataset / base_exp
     if not base_dir.exists():
         raise FileNotFoundError(f"Missing base rankings: {base_dir}")
 
-    detector = create_sift()
+    detector = create_detector(spatial_descriptor)
     out_dir = RESULTS_DIR / "rankings" / cfg.dataset / cfg.experiment
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -738,7 +838,7 @@ def run_spatial_verification_experiment(cfg, compute_ap_exe):
         base_path = base_dir / f"{query_name}.txt"
         original = read_ranking(base_path)
         try:
-            q_xy_all, q_desc_all = extract_local_descriptor(cfg.dataset, query_image_id, "sift", detector)
+            q_xy_all, q_desc_all = extract_local_descriptor(cfg.dataset, query_image_id, spatial_descriptor, detector)
             if bbox is not None and len(q_desc_all):
                 x1, y1, x2, y2 = bbox
                 keep = (q_xy_all[:, 0] >= x1) & (q_xy_all[:, 0] <= x2) & (q_xy_all[:, 1] >= y1) & (q_xy_all[:, 1] <= y2)
@@ -747,13 +847,17 @@ def run_spatial_verification_experiment(cfg, compute_ap_exe):
                 q_xy, q_desc = q_xy_all, q_desc_all
 
             reranked = []
+            original_scores = {}
+            if scoring == "inliers_plus_original_score":
+                original_scores = base_original_similarity_by_id(cfg.dataset, base_exp, query_image_id, bbox, ids)
             for original_idx, cand_id in enumerate(original[:top_n]):
-                db_xy, db_desc = extract_local_descriptor(cfg.dataset, cand_id, "sift", detector)
+                db_xy, db_desc = extract_local_descriptor(cfg.dataset, cand_id, spatial_descriptor, detector)
                 score = spatial_verification_score(
                     q_xy, q_desc, db_xy, db_desc, ratio,
                     scoring=scoring,
                     min_matches=min_matches,
                     min_inliers=min_inliers,
+                    original_score=original_scores.get(cand_id, 0.0),
                 )
                 reranked.append((score, original_idx, cand_id))
             reranked.sort(key=lambda item: (-item[0], item[1]))
@@ -761,6 +865,39 @@ def run_spatial_verification_experiment(cfg, compute_ap_exe):
         except Exception as exc:
             print(f"Spatial verification fallback for {cfg.dataset}/{query_name}: {exc}")
             ranking = original
+        write_ranking_file(ranking, out_dir / f"{query_name}.txt")
+
+    return evaluate_and_log(cfg, ids, compute_ap_exe)
+
+
+def run_verified_qe_experiment(cfg, compute_ap_exe):
+    params = cfg.extra_params or {}
+    base_exp = params["base_experiment"]
+    top_m = int(params.get("top_m", 3))
+    alpha = float(params.get("alpha", 0.5))
+    bovw_cfg = base_bovw_config_from_name(cfg.dataset, base_exp)
+    vocab = train_or_load_vocab(bovw_cfg.dataset, bovw_cfg.descriptor, bovw_cfg.vocab_size)
+    ids, X, idf = build_or_load_bovw_features(bovw_cfg, vocab)
+    id_to_idx = {image_id: i for i, image_id in enumerate(ids)}
+    base_dir = RESULTS_DIR / "rankings" / cfg.dataset / base_exp
+    if not base_dir.exists():
+        raise FileNotFoundError(f"Missing base rankings: {base_dir}")
+
+    out_dir = RESULTS_DIR / "rankings" / cfg.dataset / cfg.experiment
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for qf in tqdm(list_query_files(DATASETS[cfg.dataset]["gt_dir"]), desc=f"Verified QE {cfg.dataset}/{cfg.experiment}"):
+        query_name, query_image_id, bbox = parse_query_file(qf, return_bbox=True)
+        base_ranking = read_ranking(base_dir / f"{query_name}.txt")
+        qvec = bovw_query_components(cfg.dataset, query_image_id, bbox, bovw_cfg, vocab, ids, X, idf)
+        top_ids = [image_id for image_id in base_ranking[:top_m] if image_id in id_to_idx]
+        if top_ids:
+            top = X[[id_to_idx[image_id] for image_id in top_ids]]
+            qvec = alpha * qvec.reshape(1, -1) + (1.0 - alpha) * top.mean(axis=0, keepdims=True)
+            qvec = normalize_features(qvec, bovw_cfg.normalization)[0]
+        if np.isnan(qvec).any():
+            raise ValueError("NaN found in verified QE query vector")
+        ranking = rank_vector(qvec, X, ids, bovw_cfg.metric, query_image_id)
         write_ranking_file(ranking, out_dir / f"{query_name}.txt")
 
     return evaluate_and_log(cfg, ids, compute_ap_exe)
@@ -794,6 +931,8 @@ def run_experiment(cfg, compute_ap_exe=None):
             return run_fusion_experiment(cfg, compute_ap_exe)
         if cfg.representation == "spatial_verification":
             return run_spatial_verification_experiment(cfg, compute_ap_exe)
+        if cfg.representation == "verified_qe":
+            return run_verified_qe_experiment(cfg, compute_ap_exe)
         raise ValueError(f"Unknown representation: {cfg.representation}")
     except Exception as exc:
         return log_failure(cfg, exc)
@@ -974,6 +1113,9 @@ def spatial_score_tag(scoring):
         "inlier_count": "inliers",
         "inlier_ratio": "inlierratio",
         "inliers_plus_ratio": "inliersplusratio",
+        "inliers_plus_original_score": "inliersplusorig",
+        "normalized_inliers": "norminliers",
+        "thresholded_inliers": "thresholdedinliers",
     }[scoring]
 
 
@@ -992,14 +1134,15 @@ def spatial_experiment_name(base, top_n, ratio, scoring, min_matches=0, min_inli
 
 def make_spatial_config(dataset, base, top_n, ratio, scoring="inlier_count",
                         min_matches=0, min_inliers=0):
+    descriptor = descriptor_from_experiment_name(base)
     return ExperimentConfig(
         dataset=dataset,
         experiment=spatial_experiment_name(base, top_n, ratio, scoring, min_matches, min_inliers),
-        descriptor="sift",
+        descriptor=descriptor,
         representation="spatial_verification",
         metric=scoring,
         normalization="",
-        vocab_size=1024,
+        vocab_size=vocab_size_from_experiment_name(base),
         extra_params={
             "base_experiment": base,
             "top_n": top_n,
@@ -1007,6 +1150,7 @@ def make_spatial_config(dataset, base, top_n, ratio, scoring="inlier_count",
             "score": scoring,
             "min_matches": min_matches,
             "min_inliers": min_inliers,
+            "spatial_descriptor": descriptor,
         },
     )
 
@@ -1029,6 +1173,80 @@ def alternative_spatial_base_configs(dataset, top_n, ratio, scoring, min_matches
     ]
     for base in bases:
         yield make_spatial_config(dataset, base, top_n, ratio, scoring, min_matches, min_inliers)
+
+
+def phase5_bovw_configs(dataset="oxford"):
+    for descriptor, ks in (("rootsift", (1024, 2048, 4096)), ("sift", (2048, 4096))):
+        for k in ks:
+            yield ExperimentConfig(
+                dataset=dataset,
+                experiment=f"{descriptor}_bovw_k{k}_l2_cosine",
+                descriptor=descriptor,
+                representation="bovw",
+                metric="cosine",
+                normalization="l2",
+                vocab_size=k,
+                extra_params={"random_state": 0, "phase": 5},
+            )
+
+
+def phase5_spatial_configs(dataset="oxford"):
+    for cfg in phase5_bovw_configs(dataset):
+        yield make_spatial_config(dataset, cfg.experiment, 150, 0.65, "inlier_count")
+
+
+def alpha_tag(alpha):
+    return str(alpha).replace(".", "p")
+
+
+def make_verified_qe_config(dataset, base, top_m, alpha):
+    bovw_cfg = base_bovw_config_from_name(dataset, base)
+    return ExperimentConfig(
+        dataset=dataset,
+        experiment=f"{base}_verified_qe_top{top_m}_alpha{alpha_tag(alpha)}",
+        descriptor=bovw_cfg.descriptor,
+        representation="verified_qe",
+        metric=bovw_cfg.metric,
+        normalization=bovw_cfg.normalization,
+        vocab_size=bovw_cfg.vocab_size,
+        extra_params={
+            "base_experiment": base,
+            "top_m": top_m,
+            "alpha": alpha,
+            "phase": 5,
+        },
+    )
+
+
+def verified_qe_config_from_name(dataset, exp_name):
+    match = re.match(r"(?P<base>.+)_verified_qe_top(?P<m>\d+)_alpha(?P<alpha>[0-9p]+)$", exp_name)
+    if not match:
+        raise ValueError(f"Cannot parse verified QE experiment: {exp_name}")
+    return make_verified_qe_config(
+        dataset,
+        match.group("base"),
+        int(match.group("m")),
+        float(match.group("alpha").replace("p", ".")),
+    )
+
+
+def phase5_verified_qe_configs(dataset="oxford"):
+    bases = [
+        "sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers",
+        "rootsift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers",
+        "rootsift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers",
+        "sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers",
+    ]
+    for base in bases:
+        for top_m in (3, 5):
+            for alpha in (0.5, 0.75):
+                yield make_verified_qe_config(dataset, base, top_m, alpha)
+
+
+def phase5_scoring_refinement_configs(dataset="oxford"):
+    base = "sift_bovw_k1024_l2_cosine"
+    for scoring in ("inliers_plus_original_score", "normalized_inliers", "thresholded_inliers"):
+        yield make_spatial_config(dataset, base, 150, 0.65, scoring)
 
 
 def query_expansion_configs(rows, top_ms=(5, 10), alphas=(0.5,), limit=3):
@@ -1361,6 +1579,167 @@ def print_spatial_tuning_report(best_phase1, best_alt, fisher_rows, rows):
             print(f"Failed/skipped summary: {row.get('dataset')}/{row.get('experiment')}: {row.get('error')}")
 
 
+def existing_ok_experiment(dataset, experiment):
+    out = summary_path(False)
+    if not out.exists():
+        return False
+    df = pd.read_csv(out)
+    return (
+        df["dataset"].fillna("").astype(str).eq(dataset)
+        & df["experiment"].fillna("").astype(str).eq(experiment)
+        & df["status"].fillna("").astype(str).eq("ok")
+    ).any()
+
+
+def run_dependency_for_base(dataset, base_exp, compute_ap_exe):
+    rows = []
+    if existing_ok_experiment(dataset, base_exp):
+        return rows
+    if "_verified_qe_" in base_exp and "_spatial_verify2_" not in base_exp:
+        verified_cfg = verified_qe_config_from_name(dataset, base_exp)
+        rows.extend(run_dependency_for_base(dataset, verified_cfg.extra_params["base_experiment"], compute_ap_exe))
+        rows.append(run_experiment(verified_cfg, compute_ap_exe))
+        return rows
+    if "_spatial_verify" in base_exp:
+        bovw_base = base_exp.split("_spatial_verify", 1)[0]
+        rows.extend(run_dependency_for_base(dataset, bovw_base, compute_ap_exe))
+        rows.append(run_experiment(make_spatial_config(dataset, bovw_base, 150, 0.65, "inlier_count"), compute_ap_exe))
+        return rows
+    try:
+        rows.append(run_experiment(base_bovw_config_from_name(dataset, base_exp), compute_ap_exe))
+    except Exception as exc:
+        cfg = ExperimentConfig(
+            dataset=dataset,
+            experiment=base_exp,
+            descriptor=descriptor_from_experiment_name(base_exp),
+            representation="dependency",
+            metric="",
+            extra_params={"phase": 5},
+        )
+        rows.append(log_failure(cfg, exc))
+    return rows
+
+
+def equivalent_phase5_config(cfg, dataset):
+    cfg = ExperimentConfig(**asdict(cfg))
+    cfg.dataset = dataset
+    return cfg
+
+
+def phase5_all_known_configs(dataset="oxford"):
+    cfgs = []
+    cfgs.extend(list(phase5_bovw_configs(dataset)))
+    cfgs.extend(list(phase5_spatial_configs(dataset)))
+    cfgs.extend(list(phase5_verified_qe_configs(dataset)))
+    cfgs.extend(list(phase5_scoring_refinement_configs(dataset)))
+    return cfgs
+
+
+def run_spatial_verify2_for_best_verified_qe(dataset, verified_rows, compute_ap_exe):
+    ok = [row for row in verified_rows if row.get("status") == "ok"]
+    if not ok:
+        return []
+    best = sorted(ok, key=lambda row: row.get("map", -1), reverse=True)[0]
+    cfg = make_spatial_config(dataset, best["experiment"], 150, 0.65, "inlier_count")
+    cfg.experiment = f"{best['experiment']}_spatial_verify2_top150_ratio0p65_inliers"
+    cfg.extra_params["base_experiment"] = best["experiment"]
+    cfg.extra_params["phase"] = 5
+    return [run_experiment(cfg, compute_ap_exe)]
+
+
+def make_spatial_verify2_config(dataset, verified_qe_exp):
+    cfg = make_spatial_config(dataset, verified_qe_exp, 150, 0.65, "inlier_count")
+    cfg.experiment = f"{verified_qe_exp}_spatial_verify2_top150_ratio0p65_inliers"
+    cfg.extra_params["base_experiment"] = verified_qe_exp
+    cfg.extra_params["phase"] = 5
+    return cfg
+
+
+def run_phase5():
+    before = pd.read_csv(summary_path(False)) if summary_path(False).exists() else pd.DataFrame(columns=SUMMARY_COLUMNS)
+    compute_ap_exe = compute_ap_executable()
+    rows = []
+    phase5_cfg_map = {}
+
+    print("Phase 5A-C: RootSIFT and larger SIFT BoVW on Oxford")
+    bovw_cfgs = list(phase5_bovw_configs("oxford"))
+    for cfg in bovw_cfgs:
+        phase5_cfg_map[cfg.experiment] = cfg
+    rows.extend(run_configs(bovw_cfgs, compute_ap_exe).to_dict("records"))
+
+    print("Phase 5B-C: Spatial verification for Phase 5 BoVW configs on Oxford")
+    spatial_cfgs = list(phase5_spatial_configs("oxford"))
+    for cfg in spatial_cfgs:
+        phase5_cfg_map[cfg.experiment] = cfg
+    rows.extend(run_configs(spatial_cfgs, compute_ap_exe).to_dict("records"))
+
+    print("Phase 5D: Verified QE on Oxford")
+    verified_cfgs = list(phase5_verified_qe_configs("oxford"))
+    for cfg in verified_cfgs:
+        phase5_cfg_map[cfg.experiment] = cfg
+    verified_rows = run_configs(verified_cfgs, compute_ap_exe).to_dict("records")
+    rows.extend(verified_rows)
+
+    print("Phase 5D: Second spatial pass for best verified QE candidate")
+    verify2_rows = run_spatial_verify2_for_best_verified_qe("oxford", verified_rows, compute_ap_exe)
+    rows.extend(verify2_rows)
+    for row in verify2_rows:
+        if row.get("experiment"):
+            phase5_cfg_map[row["experiment"]] = make_spatial_verify2_config(
+                "oxford", row["experiment"].split("_spatial_verify2", 1)[0]
+            )
+
+    print("Phase 5E: Small spatial scoring refinements on Oxford")
+    refine_cfgs = list(phase5_scoring_refinement_configs("oxford"))
+    for cfg in refine_cfgs:
+        phase5_cfg_map[cfg.experiment] = cfg
+    rows.extend(run_configs(refine_cfgs, compute_ap_exe).to_dict("records"))
+
+    write_sorted_summary()
+    new_ok = [row for row in rows if row.get("status") == "ok" and row.get("dataset") == "oxford"]
+    top3 = sorted(new_ok, key=lambda row: row.get("map", -1), reverse=True)[:3]
+    print("Phase 5F: Paris validation for top 3 new Oxford experiments")
+    for row in top3:
+        base_cfg = phase5_cfg_map.get(row["experiment"])
+        if base_cfg is None:
+            continue
+        paris_cfg = equivalent_phase5_config(base_cfg, "paris")
+        base_exp = (paris_cfg.extra_params or {}).get("base_experiment")
+        if base_exp:
+            rows.extend(run_dependency_for_base("paris", base_exp, compute_ap_exe))
+        rows.append(run_experiment(paris_cfg, compute_ap_exe))
+
+    write_sorted_summary()
+    after = pd.read_csv(summary_path(False)) if summary_path(False).exists() else pd.DataFrame(columns=SUMMARY_COLUMNS)
+    newly_added = max(0, len(after) - len(before))
+    print_final_report(newly_added)
+    print_phase5_report(rows)
+    return pd.DataFrame(rows)
+
+
+def print_phase5_report(rows):
+    ok = [row for row in rows if row.get("status") == "ok"]
+    best_new = sorted(ok, key=lambda row: row.get("map", -1), reverse=True)[0] if ok else None
+    if best_new:
+        dataset = best_new["dataset"]
+        prev = 0.299115 if dataset == "oxford" else 0.406194
+        print(f"Best new Phase 5 experiment: {dataset}/{best_new['experiment']} mAP={best_new['map']:.6f}")
+        print(f"Improvement over previous {dataset} best: {best_new['map'] - prev:.6f}")
+    ox = [row for row in ok if row.get("dataset") == "oxford"]
+    rootsift_best = max([row["map"] for row in ox if str(row.get("descriptor", "")).startswith("rootsift")], default=np.nan)
+    sift_best = max([row["map"] for row in ox if str(row.get("descriptor", "")).startswith("sift")], default=np.nan)
+    print(f"RootSIFT improved over SIFT in Phase 5: {pd.notna(rootsift_best) and pd.notna(sift_best) and rootsift_best > sift_best}")
+    large_vocab_best = max([row["map"] for row in ox if row.get("vocab_size") in (2048, 4096)], default=np.nan)
+    print(f"Larger vocabularies improved over k1024 Oxford best: {pd.notna(large_vocab_best) and large_vocab_best > 0.299115}")
+    verified_best = max([row["map"] for row in ox if row.get("representation") == "verified_qe"], default=np.nan)
+    print(f"Verified QE helped over previous Oxford best: {pd.notna(verified_best) and verified_best > 0.299115}")
+    skipped = [row for row in rows if str(row.get("status", "")).startswith("skipped")]
+    failed = [row for row in rows if row.get("status") not in ("ok", "skipped/existing_success")]
+    print(f"Phase 5 failed/skipped experiments: {len(failed)} failed, {len(skipped)} skipped")
+    for row in failed[:20]:
+        print(f"Failed summary: {row.get('dataset')}/{row.get('experiment')}: {row.get('error')}")
+
+
 def print_final_report(newly_added=None):
     write_sorted_summary()
     df = pd.read_csv(summary_path(True))
@@ -1483,6 +1862,7 @@ def main(argv=None):
     parser.add_argument("--global-fusion-spatial-phase", action="store_true", help="Run this phase's global, fusion, and spatial verification experiments.")
     parser.add_argument("--spatial-tuning-phase", action="store_true", help="Run spatial verification tuning and alternative-base phase.")
     parser.add_argument("--with-fisher-smoke", action="store_true", help="Also attempt the optional Oxford Fisher Vector smoke test.")
+    parser.add_argument("--phase5", action="store_true", help="Run Phase 5 RootSIFT, larger vocabulary, verified QE, and spatial refinement experiments.")
     args = parser.parse_args(argv)
 
     if args.safe_extended:
@@ -1493,6 +1873,9 @@ def main(argv=None):
         return
     if args.spatial_tuning_phase:
         run_spatial_tuning_phase(run_fisher=args.with_fisher_smoke)
+        return
+    if args.phase5:
+        run_phase5()
         return
 
     datasets = parse_csv_arg(args.datasets)

@@ -381,6 +381,210 @@ Relative improvement over Round 2 best:
 - Alternative base rankings became competitive after spatial verification. In particular, both k256 chi-square variants with query expansion reached approximately 0.2924 on Oxford after top150/ratio0.65 spatial verification.
 - The project direction is now clear: the final system should be built around SIFT BoVW plus spatial verification, with query expansion treated as a dataset-dependent optional stage rather than an unconditional improvement.
 
+# Round 5
+
+Run on Oxford dataset, validated on Paris with the top new Phase 5 configurations.
+
+## Motivation
+
+Round 5 was motivated by the trend from Round 4:
+
+- Spatial verification was the strongest improvement so far.
+- Fusion with HOG/HSV produced only marginal gains.
+- The best Oxford Round 4 result came from plain `sift_bovw_k1024_l2_cosine` plus spatial verification, not from query expansion plus spatial verification.
+- This suggested that improving the local descriptor, visual vocabulary, and verified geometric reranking pipeline was more promising than adding more global descriptors.
+
+## Specs
+
+### RootSIFT BoVW
+
+- descriptor: RootSIFT
+- vocabulary sizes:
+  - k=1024
+  - k=2048
+  - k=4096
+- normalization: L2
+- metric: cosine
+- database descriptors: full image
+- query descriptors: bbox-restricted before query BoVW construction
+
+### Larger SIFT BoVW vocabulary
+
+- descriptor: SIFT
+- vocabulary sizes:
+  - k=2048
+  - k=4096
+- normalization: L2
+- metric: cosine
+- database descriptors: full image
+- query descriptors: bbox-restricted before query BoVW construction
+
+### Spatial verification
+
+Spatial verification was applied to the new RootSIFT/SIFT BoVW rankings.
+
+- topN = 150
+- Lowe ratio = 0.65
+- scoring = number of RANSAC inliers
+- query descriptors restricted to bbox
+- database descriptors from full image
+- original ranking tail preserved
+
+### Verified query expansion
+
+Verified query expansion was applied after spatial verification.
+
+- base ranking: spatially verified ranking
+- topM ∈ [3, 5]
+- alpha ∈ [0.5, 0.75]
+- expanded query:
+  - average topM BoVW vectors after spatial verification with the original query vector
+  - normalize expanded vector
+  - rerank all database images
+- a second spatial verification pass was run for the best verified-QE candidate.
+
+### Spatial verification scoring refinements
+
+Small scoring variants were tested on Oxford using `sift_bovw_k1024_l2_cosine` as the base:
+
+- `inliersplusorig`: RANSAC inliers plus a small original-similarity term
+- `norminliers`: inliers normalized by candidate keypoint count
+- `thresholdedinliers`: use inliers only above a small inlier threshold
+
+## Top 15 experiments Oxford ranked by mAP
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.354805 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+| 0.330680 | sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.329886 | rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.313679 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.312531 | rootsift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.307050 | rootsift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.299072 | sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliersplusorig |
+| 0.294517 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.294128 | sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_norminliers |
+| 0.291856 | rootsift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.281932 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top5_alpha0p5 |
+| 0.279195 | sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.275397 | sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_thresholdedinliers |
+| 0.273263 | rootsift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.272355 | rootsift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top5_alpha0p5 |
+
+Previous Oxford best baseline:
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.299115 | sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+
+## Top 10 experiments Paris ranked by mAP
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.431121 | rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.427590 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers |
+| 0.426952 | sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.409938 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers |
+| 0.393749 | rootsift_bovw_k4096_l2_cosine |
+| 0.388872 | sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5 |
+| 0.386438 | sift_bovw_k4096_l2_cosine |
+| 0.366916 | sift_bovw_k2048_l2_cosine |
+
+Previous Paris best baseline:
+
+| mAP | experiment |
+| --- | ---------- |
+| 0.406194 | sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p65_inliers |
+
+## Summary
+
+Phase 5 result rows identified from the summaries:
+
+- 39 Phase 5-related rows
+- 38 succeeded
+- 1 failed
+- 0 skipped in the final Phase 5-related row set
+
+Best Oxford Phase 5 result:
+
+- `sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers`
+- mAP = 0.354805
+- Previous best = 0.299115
+- Absolute improvement = +0.055690 mAP
+- Relative improvement = +18.6%
+
+Best Paris Phase 5 result:
+
+- `rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers`
+- mAP = 0.431121
+- Previous best = 0.406194
+- Absolute improvement = +0.024927 mAP
+- Relative improvement = +6.1%
+
+RootSIFT vs SIFT:
+
+- RootSIFT improved over the previous k1024 SIFT baseline when spatial verification was used.
+- On Oxford, RootSIFT did not beat the strongest SIFT Phase 5 result:
+  - SIFT k4096 + spatial verification: 0.330680
+  - RootSIFT k4096 + spatial verification: 0.329886
+- On Paris, RootSIFT k4096 + spatial verification was the best Phase 5 result:
+  - RootSIFT k4096 + spatial verification: 0.431121
+  - SIFT k4096 + spatial verification: 0.426952
+
+Larger vocabularies:
+
+- Larger vocabularies clearly improved over k1024 after spatial verification.
+- Oxford:
+  - previous k1024 SIFT spatial baseline: 0.299115
+  - SIFT k2048 + spatial verification: 0.313679
+  - SIFT k4096 + spatial verification: 0.330680
+  - RootSIFT k4096 + spatial verification: 0.329886
+- Paris:
+  - previous best: 0.406194
+  - SIFT k2048 + spatial verification: 0.409938
+  - SIFT k4096 + spatial verification: 0.426952
+  - RootSIFT k4096 + spatial verification: 0.431121
+
+Verified query expansion:
+
+- Verified QE alone did not beat the previous Oxford best.
+- The best verified-QE-only Oxford result was:
+  - `sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5`
+  - mAP = 0.294517
+- Verified QE followed by a second spatial verification pass helped strongly:
+  - Oxford: 0.354805
+  - Paris: 0.427590
+
+Notes:
+
+- One Paris row failed due to an incorrectly named second-spatial-validation dependency:
+  - `sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify_top150_ratio0p65_inliers`
+  - missing base ranking: `results/rankings/paris/sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5`
+- The correctly named `_spatial_verify2_` Paris experiment succeeded and reached 0.427590.
+- Fisher vectors were not run in this round.
+- No additional HOG/HSV fusion experiments were run.
+
+## Interpretation
+
+Round 5 changed the project direction from tuning only the geometric reranker to improving the local vocabulary that feeds it. The largest single Oxford gain came from combining a larger SIFT vocabulary with the already strong spatial verification stage, then using verified QE and a second spatial verification pass.
+
+The most consistently helpful technique was increasing vocabulary size. SIFT k4096 + spatial verification was substantially stronger than the Round 4 k1024 spatial baseline, and RootSIFT k4096 was nearly identical on Oxford while becoming best on Paris.
+
+RootSIFT was useful but dataset-dependent. It gave the best Paris result, but on Oxford it was slightly below SIFT at k4096. Therefore RootSIFT should be treated as a strong variant, not a universal replacement for SIFT.
+
+Verified QE was mixed. As a standalone reranking step after spatial verification, it generally hurt or underperformed. However, when followed by a second spatial verification pass, it produced the best Oxford result. This suggests that verified QE can introduce useful candidates but still needs geometry afterward to suppress drift.
+
+The small scoring refinements were not competitive with plain inlier count. The simple RANSAC inlier score remains the most reliable spatial verification score so far.
+
+## Next direction
+
+The next logical direction is to keep the pipeline centered on large-vocabulary BoVW plus spatial verification, and test a small number of controlled variants around the new best systems:
+
+- Validate SIFT k2048/k4096 and RootSIFT k4096 more carefully on both Oxford and Paris.
+- Explore second-pass spatial verification after verified QE for only the strongest large-vocabulary candidates.
+- Avoid broad HOG/HSV fusion and avoid new scoring grids unless motivated by a specific failure mode.
+- Consider efficiency improvements for spatial verification, since the strongest systems now depend on repeated geometric reranking.
+
 # Overall Progress Summary
 
 | Stage | Best Oxford mAP | Best Paris mAP | Best method |
@@ -389,6 +593,7 @@ Relative improvement over Round 2 best:
 | Round 2 | 0.218428 | 0.372444 | SIFT BoVW k1024 L2 cosine + query expansion |
 | Round 3 | 0.274164 | 0.392230 | SIFT BoVW k1024 L2 cosine + query expansion + spatial verification |
 | Round 4 | 0.299115 | 0.406194 | SIFT BoVW + tuned spatial verification top150 ratio0.65 |
+| Round 5 | 0.354805 | 0.431121 | Large-vocabulary SIFT/RootSIFT BoVW + spatial verification; verified QE + second spatial pass on Oxford |
 
 ## Main conclusions so far
 
@@ -399,4 +604,5 @@ Relative improvement over Round 2 best:
 - Spatial verification is the most important improvement because it directly addresses false positives caused by visually similar but geometrically inconsistent local features.
 - The best Oxford score progressed from 0.195169 in Round 1 to 0.299115 in Round 4, an absolute gain of 0.103946 mAP.
 - The best Paris score progressed from 0.372444 in Round 2 to 0.406194 in Round 4, an absolute gain of 0.033750 mAP.
-- The strongest final direction is a classical SIFT BoVW retrieval system followed by tuned spatial verification. For the report, this gives a clean experimental story: baseline BoVW → larger vocabulary and query expansion → global fusion attempt → geometric reranking as the decisive improvement.
+- Round 5 improved the best Oxford score to 0.354805 and the best Paris score to 0.431121.
+- The strongest final direction is a classical large-vocabulary SIFT/RootSIFT BoVW retrieval system followed by tuned spatial verification. For the report, this gives a clean experimental story: baseline BoVW → larger vocabulary and query expansion → global fusion attempt → geometric reranking → larger local vocabularies and verified expansion with a second geometry pass.

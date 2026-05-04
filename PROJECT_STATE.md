@@ -75,6 +75,26 @@
 
 ## Best Results So Far
 
+Phase 5 RootSIFT / larger vocabulary / verified QE phase:
+
+- Oxford best:
+  - `sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers`
+  - mAP = `0.354805`
+- Paris best:
+  - `rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers`
+  - mAP = `0.431121`
+
+Phase 5 notes:
+
+- RootSIFT was implemented as a separate descriptor type with caches under `cache/descriptors/<dataset>/rootsift/`.
+- RootSIFT BoVW vocabularies/features were cached separately from SIFT.
+- Larger vocabularies helped substantially when followed by spatial verification.
+- Best Oxford Phase 5 result used SIFT k2048 + spatial verification + verified QE top3/alpha0.5 + a second spatial verification pass.
+- Best Paris Phase 5 result used RootSIFT k4096 + spatial verification.
+- Verified QE alone did not beat the previous Oxford best, but verified QE followed by a second spatial verification pass produced the new Oxford best.
+- The small spatial scoring refinements did not improve over plain `inlier_count`.
+- One incorrectly named Paris second-spatial validation row failed cleanly before the dependency handling was corrected; the correctly named `_spatial_verify2_` experiment succeeded.
+
 Round 4 spatial-verification tuning phase:
 
 - Oxford best:
@@ -123,27 +143,28 @@ Earlier bests before spatial verification:
 Current top Oxford results:
 
 ```text
+sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers  0.354805
+sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers                      0.330680
+rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers                  0.329886
+sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers                      0.313679
+rootsift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers                  0.312531
+rootsift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers                  0.307050
 sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliers                       0.299115
-sift_bovw_k256_l2_chisquare_qe_top3_alpha0p75_spatial_verify_top150_ratio0p65_inliers   0.292443
-sift_bovw_tfidf_k256_l2_chisquare_qe_top3_alpha0p75_spatial_verify_top150_ratio0p65_inliers  0.292399
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p65_inliers      0.287424
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p5_spatial_verify_top150_ratio0p65_inliers       0.285448
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p7_inliers       0.284878
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p7_inliers_minm8_mini6  0.282550
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p6_inliers       0.282507
+sift_bovw_k1024_l2_cosine_spatial_verify_top150_ratio0p65_inliersplusorig               0.299072
 ```
 
 Current top Paris results:
 
 ```text
+rootsift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers                  0.431121
+sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5_spatial_verify2_top150_ratio0p65_inliers  0.427590
+sift_bovw_k4096_l2_cosine_spatial_verify_top150_ratio0p65_inliers                      0.426952
+sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers                      0.409938
 sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top150_ratio0p65_inliers      0.406194
+rootsift_bovw_k4096_l2_cosine                                                           0.393749
 sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_spatial_verify_top100_ratio0p7_inliers       0.392230
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_fusion_hog_hsv_cosine_histint_w0p9_0p05_0p05 0.376876
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_fusion_hsv_histint_w0p95_0p05                0.374942
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_fusion_hsv_chisquare_w0p95_0p05              0.374334
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_fusion_hog_cosine_w0p95_0p05                 0.374227
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25_fusion_hog_cosine_w0p9_0p1                   0.374082
-sift_bovw_k1024_l2_cosine_qe_top3_alpha0p25                                               0.372444
+sift_bovw_k2048_l2_cosine_spatial_verify_top150_ratio0p65_inliers_verified_qe_top3_alpha0p5  0.388872
+sift_bovw_k4096_l2_cosine                                                                 0.386438
 ```
 
 ## Commands / Notebook Cells Used
@@ -205,6 +226,12 @@ Round 4 spatial tuning phase:
 
 ```powershell
 .\.venv\Scripts\python.exe -m src.advanced_experiments --spatial-tuning-phase
+```
+
+Phase 5:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.advanced_experiments --phase5
 ```
 
 ## Constraints
